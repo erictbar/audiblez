@@ -29,11 +29,6 @@ VOICES_FILE = 'voices.json'
 config.MAX_PHONEME_LENGTH = 128
 
 
-def print_eta(total_chars, processed_chars, chars_per_sec):
-    remaining_time = (total_chars - processed_chars) / chars_per_sec
-    print(f'Estimated time remaining: {strfdelta(remaining_time)}')
-
-
 def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
     # Set ONNX providers if specified
     if providers:
@@ -74,7 +69,8 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
-    print_eta(total_chars, processed_chars, 20)  # assume 20 chars per second at the beginning
+    chars_per_sec = 50  # assume 50 chars per second at the beginning
+    print(f'Estimated time remaining (assuming 50 chars/sec): {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
 
     chapter_mp3_files = []
     durations = {}
@@ -100,7 +96,7 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
         delta_seconds = end_time - start_time
         chars_per_sec = len(text) / delta_seconds
         processed_chars += len(text)
-        print_eta(total_chars, processed_chars, chars_per_sec)
+        print(f'Estimated time remaining: {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
         print('Chapter written to', chapter_filename)
         print(f'Chapter {i} read in {delta_seconds:.2f} seconds ({chars_per_sec:.0f} characters per second)')
         progress = processed_chars * 100 // total_chars
