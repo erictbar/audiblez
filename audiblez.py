@@ -27,6 +27,11 @@ from tempfile import NamedTemporaryFile
 MODEL_FILE = 'kokoro-v0_19.onnx'
 VOICES_FILE = 'voices.json'
 config.MAX_PHONEME_LENGTH = 128
+MAX_PHONEME_LENGTH = 510
+
+def print_eta(total_chars, processed_chars, chars_per_sec):
+    remaining_time = (total_chars - processed_chars) / chars_per_sec
+    print(f'Estimated time remaining: {strfdelta(remaining_time)}')
 
 
 def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
@@ -69,8 +74,7 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
-    chars_per_sec = 50  # assume 50 chars per second at the beginning
-    print(f'Estimated time remaining (assuming 50 chars/sec): {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
+    print_eta(total_chars, processed_chars, 20)  # assume 20 chars per second at the beginning
 
     chapter_mp3_files = []
     durations = {}
@@ -179,32 +183,39 @@ def create_m4b(chapter_files, filename, title, author, cover_image):
     final_filename = filename.replace('.epub', '.m4b')
     print('Creating M4B file...')
 
+    cover_image_args = []
     if cover_image:
-        cover_image_file = NamedTemporaryFile("wb")
+        cover_image_file = NamedTemporaryFile("wb", delete=False)
         cover_image_file.write(cover_image)
-        cover_image_args = ["-i", cover_image_file.name, "-map", "0:a", "-map", "2:v"]
-    else:
-        cover_image_args = []
+        cover_image_file.close()
+        cover_image_args = ["-i", cover_image_file.name, "-map", "1:v?"]
 
-    proc = subprocess.run([
+    ffmpeg_command = [
         'ffmpeg',
-        
         '-i', f'{tmp_filename}',
         '-i', 'chapters.txt',
         *cover_image_args,
-        '-map', '0',
+        '-map', '0:a:0',  # Map only the first audio stream from the temporary file
         '-map_metadata', '1',
         '-c:a', 'copy',
-        '-c:v', 'copy',
         '-disposition:v', 'attached_pic',
-        '-c', 'copy',
+        '-metadata', f'title={title}',
+        '-metadata', f'artist={author}',
+        '-metadata', 'album=Audiobook',
         '-f', 'mp4',
         f'{final_filename}'
-    ])
+    ]
+
+    print('Running ffmpeg command:', ' '.join(ffmpeg_command))
+    proc = subprocess.run(ffmpeg_command)
     Path(tmp_filename).unlink()
+    if cover_image:
+        Path(cover_image_file.name).unlink()
     if proc.returncode == 0:
         print(f'{final_filename} created. Enjoy your audiobook.')
         print('Feel free to delete the intermediary .wav chapter files, the .m4b is all you need.')
+    else:
+        print(f'Error: ffmpeg command failed with return code {proc.returncode}')
 
 
 def probe_duration(file_name):
@@ -225,6 +236,28 @@ def create_index_file(title, creator, chapter_mp3_files, durations):
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle=Chapter {i}\n\n")
             i += 1
             start = end
+
+
+def split_text(text, max_length):
+    words = text.split()
+    chunks = []
+    current_chunk = []
+    current_length = 0
+
+    for word in words:
+        word_length = len(word)
+        if current_length + word_length + 1 > max_length:
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [word]
+            current_length = word_length
+        else:
+            current_chunk.append(word)
+            current_length += word_length + 1
+
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+
+    return chunks
 
 
 def cli_main():
