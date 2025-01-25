@@ -188,6 +188,7 @@ def create_m4b(chapter_files, filename, title, author, cover_image):
 
     proc = subprocess.run([
         'ffmpeg',
+        
         '-i', f'{tmp_filename}',
         '-i', 'chapters.txt',
         *cover_image_args,
