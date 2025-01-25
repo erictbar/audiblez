@@ -19,6 +19,7 @@ from kokoro_onnx import config
 from kokoro_onnx import Kokoro
 from ebooklib import epub
 from pydub import AudioSegment
+import torch
 from pick import pick
 import onnxruntime as ort
 from tempfile import NamedTemporaryFile
@@ -89,7 +90,7 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
             text = intro + '.\n\n' + text
         start_time = time.time()
         samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=lang)
-        sf.write(f'{chapter_filename}', samples, sample_rate)
+        sf.write(f'{chapter_filename}', samples, sample_rate, subtype='PCM_16')
         durations[chapter_filename] = len(samples) / sample_rate
         end_time = time.time()
         delta_seconds = end_time - start_time
@@ -174,7 +175,7 @@ def create_m4b(chapter_files, filename, title, author, cover_image):
             audio = AudioSegment.from_wav(wav_file)
             combined_audio += audio
         print('Converting to Mp4...')
-        combined_audio.export(tmp_filename, format="mp4", codec="aac", bitrate="64k")
+        combined_audio.export(tmp_filename, format="mp4", codec="libopus", bitrate="56k")
     final_filename = filename.replace('.epub', '.m4b')
     print('Creating M4B file...')
 
