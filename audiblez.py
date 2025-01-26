@@ -23,6 +23,7 @@ import torch
 from pick import pick
 import onnxruntime as ort
 from tempfile import NamedTemporaryFile
+import concurrent.futures
 
 MODEL_FILE = 'kokoro-v0_19.onnx'
 VOICES_FILE = 'voices.json'
@@ -32,6 +33,14 @@ config.MAX_PHONEME_LENGTH = 128
 def print_eta(total_chars, processed_chars, chars_per_sec):
     remaining_time = (total_chars - processed_chars) / chars_per_sec
     print(f'Estimated time remaining: {strfdelta(remaining_time)}')
+
+
+def convert_chapter_to_wav(kokoro, text, voice, speed, lang, chapter_filename, intro=None):
+    if intro:
+        text = intro + '.\n\n' + text
+    samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=lang)
+    sf.write(f'{chapter_filename}', samples, sample_rate, subtype='PCM_16')
+    return chapter_filename, len(samples) / sample_rate
 
 
 def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
@@ -79,32 +88,30 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
     chapter_mp3_files = []
     durations = {}
 
-    for i, text in enumerate(texts, start=1):
-        chapter_filename = filename.replace('.epub', f'_chapter_{i}.wav')
-        chapter_mp3_files.append(chapter_filename)
-        if Path(chapter_filename).exists():
-            print(f'File for chapter {i} already exists. Skipping')
-            continue
-        if len(text.strip()) < 10:
-            print(f'Skipping empty chapter {i}')
-            chapter_mp3_files.remove(chapter_filename)
-            continue
-        print(f'Reading chapter {i} ({len(text):,} characters)...')
-        if i == 1:
-            text = intro + '.\n\n' + text
-        start_time = time.time()
-        samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=lang)
-        sf.write(f'{chapter_filename}', samples, sample_rate, subtype='PCM_16')
-        durations[chapter_filename] = len(samples) / sample_rate
-        end_time = time.time()
-        delta_seconds = end_time - start_time
-        chars_per_sec = len(text) / delta_seconds
-        processed_chars += len(text)
-        print_eta(total_chars, processed_chars, chars_per_sec)
-        print('Chapter written to', chapter_filename)
-        print(f'Chapter {i} read in {delta_seconds:.2f} seconds ({chars_per_sec:.0f} characters per second)')
-        progress = processed_chars * 100 // total_chars
-        print('Progress:', f'{progress}%\n')
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        for i, text in enumerate(texts, start=1):
+            chapter_filename = filename.replace('.epub', f'_chapter_{i}.wav')
+            chapter_mp3_files.append(chapter_filename)
+            if Path(chapter_filename).exists():
+                print(f'File for chapter {i} already exists. Skipping')
+                continue
+            if len(text.strip()) < 10:
+                print(f'Skipping empty chapter {i}')
+                chapter_mp3_files.remove(chapter_filename)
+                continue
+            print(f'Reading chapter {i} ({len(text):,} characters)...')
+            intro_text = intro if i == 1 else None
+            futures.append(executor.submit(convert_chapter_to_wav, kokoro, text, voice, speed, lang, chapter_filename, intro_text))
+
+        for future in concurrent.futures.as_completed(futures):
+            chapter_filename, duration = future.result()
+            durations[chapter_filename] = duration
+            processed_chars += len(text)
+            print_eta(total_chars, processed_chars, 20)  # update ETA with a rough estimate
+            print('Chapter written to', chapter_filename)
+            progress = processed_chars * 100 // total_chars
+            print('Progress:', f'{progress}%\n')
 
     if has_ffmpeg:
         create_index_file(title, creator, chapter_mp3_files, durations)
