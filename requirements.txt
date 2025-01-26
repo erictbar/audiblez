@@ -7,4 +7,3 @@ pydub
 torch
 pick
 onnxruntime
-concurrent.futures
