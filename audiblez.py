@@ -23,7 +23,6 @@ import torch
 from pick import pick # type: ignore
 import onnxruntime as ort # type: ignore
 from tempfile import NamedTemporaryFile
-import concurrent.futures
 
 MODEL_FILE = 'kokoro-v0_19.onnx'
 VOICES_FILE = 'voices.json'
@@ -204,7 +203,7 @@ def create_m4b(chapter_files, filename, title, author, cover_image):
             '-safe', '0',
             '-i', 'concat.txt',
             '-c:a', 'libopus',
-            '-b:a', '32k',  # Lower bitrate for Opus
+            '-b:a', '64k',  # Lower bitrate for Opus
             '-application', 'audio',  # Optimize for music
             '-vbr', 'on',  # Variable bitrate
             '-compression_level', '10',  # Max compression
