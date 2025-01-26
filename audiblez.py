@@ -90,6 +90,7 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
         print('\033[91m' + 'ffmpeg not found. Please install ffmpeg to create mp3 and m4b audiobook files.' + '\033[0m')
 
     total_chars, processed_chars = sum(map(len, texts)), 0
+    start_time = time.time()  # Initialize start_time before the loop
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
@@ -97,33 +98,31 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
 
     chapter_mp3_files = []
     durations = {}
+    
+    for i, text in enumerate(texts, start=1):
+        chapter_filename = filename.replace('.epub', f'_chapter_{i}.wav')
+        chapter_mp3_files.append(chapter_filename)
+        
+        if Path(chapter_filename).exists():
+            print(f'File for chapter {i} already exists. Skipping')
+            continue
+            
+        if len(text.strip()) < 10:
+            print(f'Skipping empty chapter {i}')
+            chapter_mp3_files.remove(chapter_filename)
+            continue
+            
+        print(f'Reading chapter {i} ({len(text):,} characters)...')
+        intro_text = intro if i == 1 else None
+        chapter_filename, duration = convert_chapter_to_wav(kokoro, text, voice, speed, lang, chapter_filename, intro_text)
+        durations[chapter_filename] = duration
+        processed_chars += len(texts[i-1])
+        print_eta(total_chars, processed_chars, processed_chars / (time.time() - start_time))
+        print('Chapter written to', chapter_filename)
+        progress = processed_chars * 100 // total_chars
+        print('Progress:', f'{progress}%\n')
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        for i, text in enumerate(texts, start=1):
-            chapter_filename = filename.replace('.epub', f'_chapter_{i}.wav')
-            chapter_mp3_files.append(chapter_filename)
-            if Path(chapter_filename).exists():
-                print(f'File for chapter {i} already exists. Skipping')
-                continue
-            if len(text.strip()) < 10:
-                print(f'Skipping empty chapter {i}')
-                chapter_mp3_files.remove(chapter_filename)
-                continue
-            print(f'Reading chapter {i} ({len(text):,} characters)...')
-            intro_text = intro if i == 1 else None
-            futures.append(executor.submit(convert_chapter_to_wav, kokoro, text, voice, speed, lang, chapter_filename, intro_text))
-
-        for future in concurrent.futures.as_completed(futures):
-            chapter_filename, duration = future.result()
-            durations[chapter_filename] = duration
-            processed_chars += len(text)
-            print_eta(total_chars, processed_chars, 20)  # update ETA with a rough estimate
-            print('Chapter written to', chapter_filename)
-            progress = processed_chars * 100 // total_chars
-            print('Progress:', f'{progress}%\n')
-
-    if has_ffmpeg:
+    if has_ffmpeg:  
         create_index_file(title, creator, chapter_mp3_files, durations)
         create_m4b(chapter_mp3_files, filename, title, creator, cover_image)
 
