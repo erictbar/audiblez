@@ -9,29 +9,47 @@ import time
 import shutil
 import subprocess
 import soundfile as sf
-import ebooklib
+import ebooklib # type: ignore
 import warnings
 import re
 from pathlib import Path
 from string import Formatter
 from bs4 import BeautifulSoup
-from kokoro_onnx import config
-from kokoro_onnx import Kokoro
-from ebooklib import epub
-from pydub import AudioSegment
+from kokoro_onnx import config # type: ignore
+from kokoro_onnx import Kokoro # type: ignore
+from ebooklib import epub # type: ignore
+from pydub import AudioSegment # type: ignore
 import torch
-from pick import pick
-import onnxruntime as ort
+from pick import pick # type: ignore
+import onnxruntime as ort # type: ignore
 from tempfile import NamedTemporaryFile
 
 MODEL_FILE = 'kokoro-v0_19.onnx'
 VOICES_FILE = 'voices.json'
 config.MAX_PHONEME_LENGTH = 128
-MAX_PHONEME_LENGTH = 510
+
+# Filter specific warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+warnings.filterwarnings("ignore", category=ResourceWarning)
+warnings.filterwarnings("ignore", message="PySoundFile failed.*")
+warnings.filterwarnings('ignore', category=UserWarning, module='kokoro_onnx')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='kokoro_onnx')
+
+# Optional: Enable only specific warnings
+warnings.filterwarnings("default", category=DeprecationWarning)
+
 
 def print_eta(total_chars, processed_chars, chars_per_sec):
     remaining_time = (total_chars - processed_chars) / chars_per_sec
     print(f'Estimated time remaining: {strfdelta(remaining_time)}')
+
+
+def convert_chapter_to_wav(kokoro, text, voice, speed, lang, chapter_filename, intro=None):
+    if intro:
+        text = intro + '.\n\n' + text
+    samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=lang)
+    sf.write(f'{chapter_filename}', samples, sample_rate, subtype='PCM_16')
+    return chapter_filename, len(samples) / sample_rate
 
 
 def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
@@ -71,6 +89,7 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
         print('\033[91m' + 'ffmpeg not found. Please install ffmpeg to create mp3 and m4b audiobook files.' + '\033[0m')
 
     total_chars, processed_chars = sum(map(len, texts)), 0
+    start_time = time.time()  # Initialize start_time before the loop
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
@@ -78,35 +97,31 @@ def main(kokoro, file_path, lang, voice, pick_manually, speed, providers):
 
     chapter_mp3_files = []
     durations = {}
-
+    
     for i, text in enumerate(texts, start=1):
         chapter_filename = filename.replace('.epub', f'_chapter_{i}.wav')
         chapter_mp3_files.append(chapter_filename)
+        
         if Path(chapter_filename).exists():
             print(f'File for chapter {i} already exists. Skipping')
             continue
+            
         if len(text.strip()) < 10:
             print(f'Skipping empty chapter {i}')
             chapter_mp3_files.remove(chapter_filename)
             continue
+            
         print(f'Reading chapter {i} ({len(text):,} characters)...')
-        if i == 1:
-            text = intro + '.\n\n' + text
-        start_time = time.time()
-        samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=lang)
-        sf.write(f'{chapter_filename}', samples, sample_rate, subtype='PCM_16')
-        durations[chapter_filename] = len(samples) / sample_rate
-        end_time = time.time()
-        delta_seconds = end_time - start_time
-        chars_per_sec = len(text) / delta_seconds
-        processed_chars += len(text)
-        print(f'Estimated time remaining: {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
+        intro_text = intro if i == 1 else None
+        chapter_filename, duration = convert_chapter_to_wav(kokoro, text, voice, speed, lang, chapter_filename, intro_text)
+        durations[chapter_filename] = duration
+        processed_chars += len(texts[i-1])
+        print_eta(total_chars, processed_chars, processed_chars / (time.time() - start_time))
         print('Chapter written to', chapter_filename)
-        print(f'Chapter {i} read in {delta_seconds:.2f} seconds ({chars_per_sec:.0f} characters per second)')
         progress = processed_chars * 100 // total_chars
         print('Progress:', f'{progress}%\n')
 
-    if has_ffmpeg:
+    if has_ffmpeg:  
         create_index_file(title, creator, chapter_mp3_files, durations)
         create_m4b(chapter_mp3_files, filename, title, creator, cover_image)
 
@@ -172,50 +187,58 @@ def strfdelta(tdelta, fmt='{D:02}d {H:02}h {M:02}m {S:02}s'):
 
 
 def create_m4b(chapter_files, filename, title, author, cover_image):
-    tmp_filename = filename.replace('.epub', '.tmp.mp4')
-    if not Path(tmp_filename).exists():
-        combined_audio = AudioSegment.empty()
-        for wav_file in chapter_files:
-            audio = AudioSegment.from_wav(wav_file)
-            combined_audio += audio
-        print('Converting to Mp4...')
-        combined_audio.export(tmp_filename, format="mp4", codec="libopus", bitrate="56k")
+    tmp_filename = filename.replace('.epub', '.tmp.opus')
     final_filename = filename.replace('.epub', '.m4b')
+
+    if not Path(tmp_filename).exists():
+        # Concat WAV files using ffmpeg
+        with open('concat.txt', 'w') as f:
+            for wav_file in chapter_files:
+                f.write(f"file '{wav_file}'\n")
+        
+        print('Converting to Opus...')
+        subprocess.run([
+            'ffmpeg',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', 'concat.txt',
+            '-c:a', 'libopus',
+            '-b:a', '64k',  # Lower bitrate for Opus
+            '-application', 'audio',  # Optimize for music
+            '-vbr', 'on',  # Variable bitrate
+            '-compression_level', '10',  # Max compression
+            tmp_filename
+        ])
+        Path('concat.txt').unlink()
+
     print('Creating M4B file...')
-
-    cover_image_args = []
+    cover_args = []
     if cover_image:
-        cover_image_file = NamedTemporaryFile("wb", delete=False)
-        cover_image_file.write(cover_image)
-        cover_image_file.close()
-        cover_image_args = ["-i", cover_image_file.name, "-map", "1:v?"]
+        cover_file = NamedTemporaryFile("wb", suffix='.png', delete=False)
+        cover_file.write(cover_image)
+        cover_file.close()
+        cover_args = ['-i', cover_file.name]
 
-    ffmpeg_command = [
+    subprocess.run([
         'ffmpeg',
-        '-i', f'{tmp_filename}',
+        '-i', tmp_filename,
         '-i', 'chapters.txt',
-        *cover_image_args,
-        '-map', '0:a:0',  # Map only the first audio stream from the temporary file
+        *cover_args,
+        '-map', '0:a',
         '-map_metadata', '1',
         '-c:a', 'copy',
         '-disposition:v', 'attached_pic',
-        '-metadata', f'title={title}',
-        '-metadata', f'artist={author}',
-        '-metadata', 'album=Audiobook',
         '-f', 'mp4',
-        f'{final_filename}'
-    ]
+        final_filename
+    ])
 
-    print('Running ffmpeg command:', ' '.join(ffmpeg_command))
-    proc = subprocess.run(ffmpeg_command)
+    # Cleanup
     Path(tmp_filename).unlink()
     if cover_image:
-        Path(cover_image_file.name).unlink()
-    if proc.returncode == 0:
-        print(f'{final_filename} created. Enjoy your audiobook.')
-        print('Feel free to delete the intermediary .wav chapter files, the .m4b is all you need.')
-    else:
-        print(f'Error: ffmpeg command failed with return code {proc.returncode}')
+        Path(cover_file.name).unlink()
+
+    print(f'{final_filename} created. Enjoy your audiobook.')
+    print('Feel free to delete the intermediary .wav chapter files, the .m4b is all you need.')
 
 
 def probe_duration(file_name):
@@ -236,28 +259,6 @@ def create_index_file(title, creator, chapter_mp3_files, durations):
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle=Chapter {i}\n\n")
             i += 1
             start = end
-
-
-def split_text(text, max_length):
-    words = text.split()
-    chunks = []
-    current_chunk = []
-    current_length = 0
-
-    for word in words:
-        word_length = len(word)
-        if current_length + word_length + 1 > max_length:
-            chunks.append(' '.join(current_chunk))
-            current_chunk = [word]
-            current_length = word_length
-        else:
-            current_chunk.append(word)
-            current_length += word_length + 1
-
-    if current_chunk:
-        chunks.append(' '.join(current_chunk))
-
-    return chunks
 
 
 def cli_main():
