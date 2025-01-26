@@ -9,25 +9,35 @@ import time
 import shutil
 import subprocess
 import soundfile as sf
-import ebooklib
+import ebooklib # type: ignore
 import warnings
 import re
 from pathlib import Path
 from string import Formatter
 from bs4 import BeautifulSoup
-from kokoro_onnx import config
-from kokoro_onnx import Kokoro
-from ebooklib import epub
-from pydub import AudioSegment
+from kokoro_onnx import config # type: ignore
+from kokoro_onnx import Kokoro # type: ignore
+from ebooklib import epub # type: ignore
+from pydub import AudioSegment # type: ignore
 import torch
-from pick import pick
-import onnxruntime as ort
+from pick import pick # type: ignore
+import onnxruntime as ort # type: ignore
 from tempfile import NamedTemporaryFile
 import concurrent.futures
 
 MODEL_FILE = 'kokoro-v0_19.onnx'
 VOICES_FILE = 'voices.json'
 config.MAX_PHONEME_LENGTH = 128
+
+# Filter specific warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+warnings.filterwarnings("ignore", category=ResourceWarning)
+warnings.filterwarnings("ignore", message="PySoundFile failed.*")
+warnings.filterwarnings('ignore', category=UserWarning, module='kokoro_onnx')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='kokoro_onnx')
+
+# Optional: Enable only specific warnings
+warnings.filterwarnings("default", category=DeprecationWarning)
 
 
 def print_eta(total_chars, processed_chars, chars_per_sec):
