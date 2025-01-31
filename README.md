@@ -12,9 +12,9 @@ using Kokoro's high-quality speech synthesis.
 
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) is a recently published text-to-speech model with just 82M params and very natural sounding output.
 It's released under Apache licence and it was trained on < 100 hours of audio.
-It currently supports American and British English in a bunch of very good voices.
+It currently supports American and British English in a bunch of very good voices. 
 
-**Future support for French, Korean, Japanese and Mandarin is planned.**
+Future support for French, Korean, Japanese and Mandarin is planned.
 
 On a Google Colab's T4 GPU via Cuda, **it takes about 5 minutes to convert "Animal's Farm" by Orwell** (which is a bout 160,000 characters) to audiobook, at a rate of about 600 characters per second.
 
@@ -23,9 +23,12 @@ On my M2 MacBook Pro, on CPU, it takes about 1 hour, at a rate of about 60 chara
 ## How to install and run
 
 If you have Python 3 on your computer, you can install it with pip.
+You also need `espeak-ng` installed on your machine:
 
 ```bash
 pip install audiblez
+sudo apt install espeak-ng  # on Ubuntu/Debian
+brew install espeak-ng      # on Mac
 ```
 
 Then, to convert an epub file into an audiobook, just run:
@@ -57,13 +60,13 @@ You can try them here: [https://huggingface.co/spaces/hexgrad/Kokoro-TTS](https:
 
 ## How to run on GPU
 
-By default audiblez runs on CPU. If it finds CUDA available as Torch device it tries to use it.
+Experimental support for Cuda is available b
 
-We don't currently support Apple Silicon, as there is not yet a Kokoro implementation in MLX. As soon as it will be available, we will support it.
-
-## How to run on Google Colab
+By default audiblez runs on CPU. If you pass the option `--cuda` it will try to use the Cuda device via Torch.
 
 Check out this example: [Audiblez running on a Google Colab Notebook with Cuda ](https://colab.research.google.com/drive/164PQLowogprWQpRjKk33e-8IORAvqXKI?usp=sharing]).
+
+We don't currently support Apple Silicon, as there is not yet a Kokoro implementation in MLX. As soon as it will be available, we will support it.
 
 ## Author
 

@@ -1,0 +1,9 @@
+argparse
+soundfile
+ebooklib
+beautifulsoup4
+kokoro-onnx
+pydub
+torch
+pick
+onnxruntime
