@@ -79,8 +79,6 @@ def main(file_path, voice, pick_manually, speed, max_chapters=None):
             print(f'Skipping empty chapter {i}')
             chapter_wav_files.remove(chapter_filename)
             continue
-            
-        print(f'Reading chapter {i} ({len(text):,} characters)...')
         if i == 1:
             text = intro + '.\n\n' + text
         start_time = time.time()
