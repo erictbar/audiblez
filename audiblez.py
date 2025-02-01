@@ -2,19 +2,21 @@
 # audiblez - A program to convert e-books into audiobooks using
 # Kokoro-82M model for high-quality text-to-speech synthesis.
 # by Claudio Santini 2025 - https://claudio.uk
+import torch
+import spacy
+import ebooklib
+import soundfile
+import numpy as np
 import argparse
 import sys
 import time
 import shutil
 import subprocess
-import numpy as np
-import soundfile
-import ebooklib
-import warnings
 import re
-import torch
+from tabulate import tabulate
 from pathlib import Path
 from string import Formatter
+from yaspin import yaspin
 from bs4 import BeautifulSoup
 from kokoro import KPipeline
 from ebooklib import epub
@@ -22,34 +24,35 @@ from pydub import AudioSegment
 from pick import pick
 from tempfile import NamedTemporaryFile
 
-from voices import voices, available_voices_str
-
 sample_rate = 24000
 
 
-def main(pipeline, file_path, voice, pick_manually, speed):
+def main(file_path, voice, pick_manually, speed, max_chapters=None):
+    if not spacy.util.is_package("xx_ent_wiki_sm"):
+        print("Downloading Spacy model xx_ent_wiki_sm...")
+        spacy.cli.download("xx_ent_wiki_sm")
     filename = Path(file_path).name
-    warnings.simplefilter("ignore")
     book = epub.read_epub(file_path)
     meta_title = book.get_metadata('DC', 'title')
     title = meta_title[0][0] if meta_title else ''
     meta_creator = book.get_metadata('DC', 'creator')
-    by_creator = 'by ' + meta_creator[0][0] if meta_creator else ''
+    creator = meta_creator[0][0] if meta_creator else ''
 
-    cover_maybe = [c for c in book.get_items() if c.get_type() == ebooklib.ITEM_COVER]
-    cover_image = cover_maybe[0].get_content() if cover_maybe else b""
+    cover_maybe = find_cover(book)
+    cover_image = cover_maybe.get_content() if cover_maybe else b""
     if cover_maybe:
-        print(f'Found cover image {cover_maybe[0].file_name} in {cover_maybe[0].media_type} format')
+        print(f'Found cover image {cover_maybe.file_name} in {cover_maybe.media_type} format')
 
-    intro = f'{title} {by_creator}'
+    intro = f'{title} – {creator}.\n\n'
     print(intro)
-    print('Found Chapters:', [c.get_name() for c in book.get_items() if c.get_type() == ebooklib.ITEM_DOCUMENT])
-    if pick_manually:
-        chapters = pick_chapters(book)
+
+    document_chapters = find_document_chapters_and_extract_texts(book)
+    if pick_manually is True:
+        selected_chapters = pick_chapters(document_chapters)
     else:
-        chapters = find_chapters(book)
-    print('Automatically selected chapters:', [c.get_name() for c in chapters])
-    texts = extract_texts(chapters)
+        selected_chapters = find_good_chapters(document_chapters)
+    print_selected_chapters(document_chapters, selected_chapters)
+    texts = [c.extracted_text for c in selected_chapters]
 
     has_ffmpeg = shutil.which('ffmpeg') is not None
     if not has_ffmpeg:
@@ -62,56 +65,100 @@ def main(pipeline, file_path, voice, pick_manually, speed):
     chars_per_sec = 500 if torch.cuda.is_available() else 50
     print(f'Estimated time remaining (assuming {chars_per_sec} chars/sec): {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
 
-    chapter_mp3_files = []
-    for i, text in enumerate(texts, start=1):
-        chapter_filename = filename.replace('.epub', f'_chapter_{i}.wav')
-        chapter_mp3_files.append(chapter_filename)
+    chapter_wav_files = []
+    for i, chapter in enumerate(selected_chapters, start=1):
+        if max_chapters and i > max_chapters: break
+        text = chapter.extracted_text
+        xhtml_file_name = chapter.get_name().replace(' ', '_').replace('/', '_').replace('\\', '_')
+        chapter_filename = filename.replace('.epub', f'_chapter_{i}_{voice}_{xhtml_file_name}.wav')
+        chapter_wav_files.append(chapter_filename)
         if Path(chapter_filename).exists():
             print(f'File for chapter {i} already exists. Skipping')
             continue
-            
         if len(text.strip()) < 10:
             print(f'Skipping empty chapter {i}')
-            chapter_mp3_files.remove(chapter_filename)
+            chapter_wav_files.remove(chapter_filename)
             continue
             
         print(f'Reading chapter {i} ({len(text):,} characters)...')
         if i == 1:
             text = intro + '.\n\n' + text
         start_time = time.time()
+        pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
 
-        audio_segments = gen_audio_segments(pipeline, text, voice, speed)
-        if audio_segments:
-            final_audio = np.concatenate(audio_segments)
-            soundfile.write(chapter_filename, final_audio, sample_rate)
-            end_time = time.time()
-            delta_seconds = end_time - start_time
-            chars_per_sec = len(text) / delta_seconds
-            processed_chars += len(text)
-            print(f'Estimated time remaining: {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
-            print('Chapter written to', chapter_filename)
-            print(f'Chapter {i} read in {delta_seconds:.2f} seconds ({chars_per_sec:.0f} characters per second)')
-            progress = processed_chars * 100 // total_chars
-            print('Progress:', f'{progress}%\n')
-        else:
-            print(f'Warning: No audio generated for chapter {i}')
-            chapter_mp3_files.remove(chapter_filename)
+        with yaspin(text=f'Reading chapter {i} ({len(text):,} characters)...', color="yellow") as spinner:
+            audio_segments = gen_audio_segments(pipeline, text, voice, speed)
+            if audio_segments:
+                final_audio = np.concatenate(audio_segments)
+                soundfile.write(chapter_filename, final_audio, sample_rate)
+                end_time = time.time()
+                delta_seconds = end_time - start_time
+                chars_per_sec = len(text) / delta_seconds
+                processed_chars += len(text)
+                spinner.ok("✅")
+                print(f'Estimated time remaining: {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
+                print('Chapter written to', chapter_filename)
+                print(f'Chapter {i} read in {delta_seconds:.2f} seconds ({chars_per_sec:.0f} characters per second)')
+                progress = processed_chars * 100 // total_chars
+                print('Progress:', f'{progress}%\n')
+            else:
+                spinner.fail("❌")
+                print(f'Warning: No audio generated for chapter {i}')
+                chapter_wav_files.remove(chapter_filename)
 
     if has_ffmpeg:
-        create_index_file(title, by_creator, chapter_mp3_files)
-        create_m4b(chapter_mp3_files, filename, title, by_creator, cover_image)
+        create_index_file(title, creator, chapter_wav_files)
+        create_m4b(chapter_wav_files, filename, cover_image)
+
+
+def find_cover(book):
+    def is_image(item):
+        return item is not None and item.media_type.startswith('image/')
+
+    for item in book.get_items_of_type(ebooklib.ITEM_COVER):
+        if is_image(item):
+            return item
+
+    # https://idpf.org/forum/topic-715
+    for meta in book.get_metadata('OPF', 'cover'):
+        if is_image(item := book.get_item_with_id(meta[1]['content'])):
+            return item
+
+    if is_image(item := book.get_item_with_id('cover')):
+        return item
+
+    for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+        if 'cover' in item.get_name().lower() and is_image(item):
+            return item
+
+    return None
+
+
+def print_selected_chapters(document_chapters, chapters):
+    print(tabulate([
+        [i, c.get_name(), len(c.extracted_text), '✅' if c in chapters else '', chapter_beginning_one_liner(c)]
+        for i, c in enumerate(document_chapters, start=1)
+    ], headers=['#', 'Chapter', 'Text Length', 'Selected', 'First words']))
 
 
 def gen_audio_segments(pipeline, text, voice, speed):
+    nlp = spacy.load('xx_ent_wiki_sm')
+    nlp.add_pipe('sentencizer')
     audio_segments = []
-    for gs, ps, audio in pipeline(text, voice=voice, speed=speed, split_pattern=r'\n+'):
-        audio_segments.append(audio)
+    doc = nlp(text)
+    sentences = list(doc.sents)
+    for sent in sentences:
+        for gs, ps, audio in pipeline(sent.text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+            audio_segments.append(audio)
     return audio_segments
 
 
-def extract_texts(chapters):
-    texts = []
-    for chapter in chapters:
+def find_document_chapters_and_extract_texts(book):
+    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text."""
+    document_chapters = []
+    for chapter in book.get_items():
+        if chapter.get_type() != ebooklib.ITEM_DOCUMENT:
+            continue
         xml = chapter.get_body_content()
         soup = BeautifulSoup(xml, features='lxml')
         chapter_text = ''
@@ -120,38 +167,46 @@ def extract_texts(chapters):
             inner_text = child.text.strip() if child.text else ""
             if inner_text:
                 chapter_text += inner_text + '\n'
-        texts.append(chapter_text)
-    return texts
+        chapter.extracted_text = chapter_text
+        document_chapters.append(chapter)
+    return document_chapters
 
 
 def is_chapter(c):
     name = c.get_name().lower()
-    return bool(
+    has_min_len = len(c.extracted_text) > 100
+    title_looks_like_chapter = bool(
         'chapter' in name.lower()
-        or re.search(r'part\d{1,3}', name)
-        or re.search(r'ch\d{1,3}', name)
-        or re.search(r'chap\d{1,3}', name)
+        or re.search(r'part_?\d{1,3}', name)
+        or re.search(r'split_?\d{1,3}', name)
+        or re.search(r'ch_?\d{1,3}', name)
+        or re.search(r'chap_?\d{1,3}', name)
     )
+    return has_min_len and title_looks_like_chapter
 
 
-def find_chapters(book, verbose=False):
-    chapters = [c for c in book.get_items() if c.get_type() == ebooklib.ITEM_DOCUMENT and is_chapter(c)]
-    if verbose:
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                print(f"'{item.get_name()}'" + ', #' + str(len(item.get_body_content())))
+def chapter_beginning_one_liner(c, chars=20):
+    s = c.extracted_text[:chars].strip().replace('\n', ' ').replace('\r', ' ')
+    return s + '…' if len(s) > 0 else ''
+
+
+def find_good_chapters(document_chapters):
+    chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT and is_chapter(c)]
     if len(chapters) == 0:
-        print('Not easy to find the chapters, defaulting to all available documents.')
-        chapters = [c for c in book.get_items() if c.get_type() == ebooklib.ITEM_DOCUMENT]
+        print('Not easy to recognize the chapters, defaulting to all non-empty documents.')
+        chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT and len(c.extracted_text) > 10]
     return chapters
 
 
-def pick_chapters(book):
-    all_chapters_names = [c.get_name() for c in book.get_items() if c.get_type() == ebooklib.ITEM_DOCUMENT]
+def pick_chapters(chapters):
+    # Display the document name, the length and first 50 characters of the text
+    chapters_by_names = {
+        f'{c.get_name()}\t({len(c.extracted_text)} chars)\t[{chapter_beginning_one_liner(c, 50)}]': c
+        for c in chapters}
     title = 'Select which chapters to read in the audiobook'
-    selected_chapters_names = pick(all_chapters_names, title, multiselect=True, min_selection_count=1)
-    selected_chapters_names = [c[0] for c in selected_chapters_names]
-    selected_chapters = [c for c in book.get_items() if c.get_name() in selected_chapters_names]
+    ret = pick(list(chapters_by_names.keys()), title, multiselect=True, min_selection_count=1)
+    selected_chapters_out_of_order = [chapters_by_names[r[0]] for r in ret]
+    selected_chapters = [c for c in chapters if c in selected_chapters_out_of_order]
     return selected_chapters
 
 
@@ -270,9 +325,28 @@ def cli_main():
         else:
             print('CUDA GPU not available. Defaulting to CPU')
 
-    pipeline = KPipeline(lang_code=args.voice[0])  # a for american or b for british
-    main(pipeline, args.epub_file_path, args.voice, args.pick, args.speed)
+    main(args.epub_file_path, args.voice, args.pick, args.speed)
 
+
+flags = {'a': '🇺🇸', 'b': '🇬🇧', 'e': '🇪🇸', 'f': '🇫🇷', 'h': '🇮🇳', 'i': '🇮🇹', 'j': '🇯🇵', 'p': '🇧🇷', 'z': '🇨🇳'}
+
+voices = {
+    'a': ['af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova',
+          'af_river', 'af_sarah', 'af_sky', 'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam',
+          'am_michael', 'am_onyx', 'am_puck', 'am_santa'],
+    'b': ['bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily', 'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis'],
+    'e': ['ef_dora', 'em_alex', 'em_santa'],
+    'f': ['ff_siwis'],
+    'h': ['hf_alpha', 'hf_beta', 'hm_omega', 'hm_psi'],
+    'i': ['if_sara', 'im_nicola'],
+    'j': ['jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo'],
+    'p': ['pf_dora', 'pm_alex', 'pm_santa'],
+    'z': ['zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunjian', 'zm_yunxi', 'zm_yunxia',
+          'zm_yunyang']
+}
+
+available_voices_str = ('\n'.join([f'  {flags[lang]} {", ".join(voices[lang])}' for lang in voices])
+                        .replace(' af_sky,', '\n       af_sky,'))
 
 if __name__ == '__main__':
     cli_main()
