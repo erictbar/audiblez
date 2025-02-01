@@ -106,7 +106,7 @@ def main(file_path, voice, pick_manually, speed, max_chapters=None):
 
     if has_ffmpeg:
         create_index_file(title, creator, chapter_wav_files)
-        create_m4b(chapter_wav_files, filename, cover_image)
+        create_m4b(chapter_wav_files, filename, title, creator, cover_image)
 
 
 def find_cover(book):
