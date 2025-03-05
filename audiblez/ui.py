@@ -555,14 +555,24 @@ class MainWindow(wx.Frame):
 
     def open_folder_with_explorer(self, folder_path):
         try:
-            if platform.system() == 'Windows':
+            if platform.system() == 'Linux' and 'microsoft' in platform.uname().release.lower():
+                # We're in WSL2
+                # Convert Linux path to Windows path
+                folder_path = folder_path.replace('/', '\\')
+                if folder_path.startswith('\\mnt\\'):
+                    # Convert /mnt/c/... to C:\...
+                    drive_letter = folder_path[5:6].upper()
+                    folder_path = f"{drive_letter}:{folder_path[6:]}"
+                subprocess.run(['explorer.exe', folder_path], shell=True)
+            elif platform.system() == 'Windows':
                 subprocess.Popen(['explorer', folder_path])
             elif platform.system() == 'Linux':
                 subprocess.Popen(['xdg-open', folder_path])
             elif platform.system() == 'Darwin':
                 subprocess.Popen(['open', folder_path])
         except Exception as e:
-            print(e)
+            print(f"Error opening folder: {e}")
+            print(f"Please open this folder manually: {folder_path}")
 
 
 class CoreThread(threading.Thread):
